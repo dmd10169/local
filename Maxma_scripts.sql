@@ -5919,7 +5919,9 @@ with purch as
 	, p.id
 	, p.clientId
 	, p.bonusesApplied
+	, p.bonusesCollected
 	, p.offerDiscount
+	, p.promocodeDiscount
 	, pc.codeType
 	, p.paidAmount
 from purchase p
@@ -5929,8 +5931,14 @@ select
 	  p.mon as mon
 	, p.globalKey as brand_id
 	, 'purchase_data' as row_type
-	, max(case when p.bonusesApplied > 0 then 1 else 0 end) as bonuses_lp
-	, max(case when p.offerDiscount > 0 or po.amount > 0 then 1 else 0 end) as offer_lp
+	, max(case when p.bonusesApplied > 0 or p.bonusesCollected > 0 then 1 else 0 end) as bonuses_lp
+	, max(case when p.offerDiscount > 0 or p.promocodeDiscount > 0 or po.amount > 0 then 1 else 0 end) as offer_lp
+	, count(case when (p.bonusesApplied > 0 or p.bonusesCollected > 0)
+		and not (p.offerDiscount > 0 or p.promocodeDiscount > 0 or po.amount > 0) then p.id end) as bonuses_lp_purchases
+	, count(case when (p.offerDiscount > 0 or p.promocodeDiscount > 0 or po.amount > 0)
+		and not (p.bonusesApplied > 0 or p.bonusesCollected > 0) then p.id end) as offer_lp_purchases
+	, count(case when (p.offerDiscount > 0 or p.promocodeDiscount > 0 or po.amount > 0)
+		and (p.bonusesApplied > 0 or p.bonusesCollected > 0) then p.id end) as mix_lp_purchases
 	, count(p.id) as total_purchases
 	, sum(coalesce(p.paidAmount,0)) as revenue
 	, count(p.clientId) as pl_purchases
@@ -6041,16 +6049,21 @@ select
 	, coalesce(p.row_type, s.row_type) as row_type
 	, p.bonuses_lp as bonuses_lp
 	, p.offer_lp as offer_lp
+	, p.bonuses_lp_purchases as bonuses_lp_purchases
+	, p.offer_lp_purchases as offer_lp_purchases
+	, p.mix_lp_purchases as mix_lp_purchases
 	, p.total_purchases as total_purchases
 	, p.revenue as revenue
 	, p.pl_purchases as pl_purchases
 	, p.common_promocodes as common_promocodes
 	, p.personal_promocodes as personal_promocodes
-	, b.levels_qty as levels_qty
-	, b.min_cashback as min_cashback
-	, b.max_cashback as max_cashback
-	, b.min_spent_level as min_spent_level
-	, b.max_spent_level as max_spent_level
+	, coalesce(b.levels_qty, case when toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) > 0 then 1 end) as levels_qty
+	, coalesce(b.min_cashback, case when toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) > 0 
+		then toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) end) as min_cashback
+	, coalesce(b.max_cashback, case when toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) > 0
+		then toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) end) as max_cashback
+	, coalesce(b.min_spent_level, case when toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) > 0 then 0 end) as min_spent_level
+	, coalesce(b.max_spent_level, case when toDecimal32(JSONExtractString(br.settings, 'cashbackFactor'), 2) > 0 then 0 end) as max_spent_level
 	, b.rev_type as rev_type
 	, b.industry as industry
 	, ig.industry_group as industry_group
@@ -6076,6 +6089,8 @@ left join modules m on m.brand_id = p.brand_id and m.mon = p.mon
 left join brand_data_w_mon b on b.brand_id = coalesce(p.brand_id, s.brand_id) and b.mon = coalesce(p.mon, s.mon)
 left join brand br on br.globalKey = coalesce(p.brand_id, s.brand_id)
 left join bi_industry_group ig on ig.industry = b.industry;
+
+select * from bi_brands_research;
 
 --Квартили по числу клиентов
 with brand_clients_data as
