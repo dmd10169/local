@@ -5539,6 +5539,17 @@ brands_w_clients_6_mon_raw as
 		any(b.clients) over (partition by b.brand_id order by b.dt rows between 1 preceding and 1 preceding) as clients_daily_growth
 from brands_w_clients b, max_dt m
 where dt >= m.max_dt - 180),
+brands_w_clients_per_year as
+(select
+	  bwc.brand_id as brand_id
+	, max(case when bwc.dt = bs.fee_start_date then bwc.clients end) as clients_on_start
+	, max(case when bwc.dt = '2022-12-31' then bwc.clients end) as clients_2022
+	, max(case when bwc.dt = '2023-12-31' then bwc.clients end) as clients_2023
+	, max(case when bwc.dt = '2024-12-31' then bwc.clients end) as clients_2024
+from brands_w_clients bwc
+left join (select brand_id, min(fee_start_date + 30) as fee_start_date
+		from bi_daily_starts group by 1) bs on bs.brand_id = bwc.brand_id
+group by 1),
 brands_w_clients_6_mon as
 (select
 	  brand_id
@@ -5572,11 +5583,14 @@ fee_dynamics as
 (select
 	  brand_id
 	, avg(case when year(dt) = 2022 then fee end) -
-		max(case when (fee_start_date <= '2022-01-01' and dt = '2022-01-01') or (fee_start_date = dt) then fee end) as fee_dynamic_2022
+		max(case when (fee_start_date <= '2022-01-01' and dt = '2022-01-01') 
+			or (fee_start_date between '2022-01-01' and '2022-12-31' and fee_start_date = dt) then fee end) as fee_dynamic_2022
 	, avg(case when year(dt) = 2023 then fee end) -
-		max(case when (fee_start_date <= '2023-01-01' and dt = '2023-01-01') or (fee_start_date = dt) then fee end) as fee_dynamic_2023
+		max(case when (fee_start_date <= '2023-01-01' and dt = '2023-01-01') 
+			or (fee_start_date between '2023-01-01' and '2023-12-31' and fee_start_date = dt) then fee end) as fee_dynamic_2023
 	, avg(case when year(dt) = 2024 then fee end) -
-		max(case when (fee_start_date <= '2024-01-01' and dt = '2024-01-01') or (fee_start_date = dt) then fee end) as fee_dynamic_2024
+		max(case when (fee_start_date <= '2024-01-01' and dt = '2024-01-01') 
+			or (fee_start_date between '2024-01-01' and '2024-12-31' and fee_start_date = dt) then fee end) as fee_dynamic_2024
 	, max(case when dt = max_dt then fee end) - max(case when fee_start_date = dt then fee end) as fee_dynamic
 from bi_daily_fee_wo_0
 group by 1),
@@ -5609,6 +5623,10 @@ select
 	, lt.LT_on_date as LT
 	, c.clients as clients
 	, case when c.clients_wallet > c.clients then c.clients else c.clients_wallet end as clients_wallet
+	, cy.clients_on_start as clients_on_start
+	, cy.clients_2022 as clients_2022
+	, cy.clients_2023 as clients_2023
+	, cy.clients_2024 as clients_2024
 	, t.tariff_name as tariff_name
 	, t.current_tariff as current_tariff
 	, t.upper_clients_border as upper_clients_border
@@ -5626,11 +5644,11 @@ left join brand b on b.globalKey = t.brand_id
 left join bi_daily_ltv lt on lt.brand_id = t.brand_id and lt.dt = m.max_dt
 left join brands_w_clients c on c.brand_id = t.brand_id and c.dt = m.max_dt
 left join brands_w_clients_6_mon c6 on c6.brand_id = t.brand_id
+left join brands_w_clients_per_year cy on cy.brand_id = t.brand_id
 left join fee_dynamics fd on fd.brand_id = t.brand_id
 left join purchase_6_mon p on p.brand_id = t.brand_id;
 
-select * from bi_brands_potential where brand_name ilike '%комода%';
-select * from tariff_price where tariffBrandComponentId = '718e2f35-8881-4806-99c4-db7ecfe61573';
+select * from bi_brands_potential;
 
 ------
 --Оценка потенциала критичности базы (BI-93)

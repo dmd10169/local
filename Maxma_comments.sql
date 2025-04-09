@@ -2966,6 +2966,22 @@ modify column clients_wallet
 comment 'Число клиентов бренда с Wallet';
 
 alter table bi_brands_potential 
+modify column clients_on_start
+comment 'Число клиентов бренда на момент окончания пилота';
+
+alter table bi_brands_potential 
+modify column clients_2022
+comment 'Число клиентов бренда на конец 2022 года';
+
+alter table bi_brands_potential 
+modify column clients_2023
+comment 'Число клиентов бренда на конец 2023 года';
+
+alter table bi_brands_potential 
+modify column clients_2024
+comment 'Число клиентов бренда на конец 2024 года';
+
+alter table bi_brands_potential 
 modify column tariff_name
 comment 'Название тарифа';
 
@@ -3279,23 +3295,3 @@ comment 'CR в заказы из открытых';
 alter table bi_brands_research
 modify column sdr
 comment 'CR в заказы из доставленных';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-select * from bi_brands_research;
