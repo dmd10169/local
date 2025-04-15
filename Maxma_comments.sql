@@ -3295,3 +3295,8 @@ comment 'CR в заказы из открытых';
 alter table bi_brands_research
 modify column sdr
 comment 'CR в заказы из доставленных';
+---------------
+
+---------------
+alter table bi_clients_report_from_product 
+modify comment 'Слепок выгрузки из базы (по ТЗ задачи BI-83)';

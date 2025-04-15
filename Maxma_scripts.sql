@@ -6131,3 +6131,155 @@ where clients > 1000;
 --q5 50000 - ...
 
 select * from bi_brands_research;
+
+--Выгрузка из базы (BI-83) (переписывание скрипта)
+drop table bi_clients_report_from_product;
+create live view bi_clients_report_from_product with refresh 14400 as
+with 
+toDate('2019-01-01') AS start_date,
+toDate(date_trunc('month', now())) AS end_date,
+toUInt64(dateDiff('month', start_date, end_date)) AS num_months,
+gen_series as
+(select
+    toStartOfMonth(addMonths(start_date, arrayJoin(range(num_months + 1)))) as mon),
+x as
+(select
+	  globalKey
+	, date_trunc('month',billedAt) as billedAt
+	, sum(case when operation = 0 then amount else 0 end) as sub_amount
+	, sum(case when operation = 2 then amount else 0 end) as sms_amount
+	, sum(case when operation = 2 then statAmount else 0 end) as sms_stat_amount
+from expense
+group by 1,2),
+p as
+(select
+	  p.globalKey as globalKey
+	, date_trunc('month',p.executedAt) as executedAt
+	, count(case when p.clientId is null then p.globalKey end) as cnt_without_card
+	, count(case when p.clientId is not null then p.globalKey end) as cnt_with_card
+	, count(distinct case when p.clientId is not null then p.clientId end) as unique_clients_cnt
+	, sum(p.paidAmount) as revenue_total
+	, sum(case when p.clientId is null then p.paidAmount else 0 end) as revenue_without_card
+	, avg(case when p.clientId is not null then p.totalAmount end) as avg_amount_with_card
+	, avg(case when p.clientId is null then p.totalAmount end) as avg_amount_without_card
+	, sum(case when p.mailingBrandId is not null then p.paidAmount else 0 end) as mailing_revenue
+	, sum(case when p.mailingBrandId is not null then p.totalAmount - p.paidAmount else 0 end) as mailing_discount
+	, sum(case when offerDiscount > 0 then p.paidAmount else 0 end) as offer_revenue
+	, sum(case when offerDiscount > 0 then p.totalAmount - p.paidAmount else 0 end) as offer_discount
+	, sum(case when promocodeId is not null and pr.codeType <> 2 then p.paidAmount else 0 end) as promocode_revenue
+	, sum(case when promocodeId is not null and pr.codeType <> 2 then p.totalAmount - p.paidAmount else 0 end) as promocode_discount
+	, sum(case when promocodeId is not null and pr.codeType = 2 then p.paidAmount else 0 end) as friend_revenue
+	, sum(case when promocodeId is not null and pr.codeType = 2 then p.totalAmount - p.paidAmount else 0 end) as friend_discount
+	, avg(case when p.clientId is not null then p.paidAmount end) as avg_profit_with_card --уточнить поле
+	, avg(case when p.clientId is null then p.paidAmount end) as avg_profit_without_card --уточнить поле
+	, sum(case when gc.amount > 0 then p.paidAmount + gc.amount else 0 end) as gc_revenue
+	, sum(case when gc.amount > 0 then p.totalAmount - p.paidAmount else 0 end) as gc_discount
+from purchase p
+left join promocode pr on pr.id = p.promocodeId and pr.globalKey = p.globalKey
+left join (select globalKey, purchaseId, sum(amount) as amount from gift_card_applied group by 1,2) gc 
+	on gc.purchaseId = p.id and gc.globalKey = p.globalKey
+group by 1,2),
+c0 as
+(select
+	  c.globalKey as globalKey
+	, date_trunc('month',c.createdAt) as createdAt
+	, count(*) as clients_cnt
+	, count(case when not w.isAndroid then w.id end) as wallet_cards_ios_cnt
+	, count(case when w.isAndroid then w.id end) as wallet_cards_android_cnt
+	, count(case when not c.isPhoneNumberEmpty and c.isPhoneSubscribed then c.id end) as clients_with_phone_cnt
+from client c
+left join wallet_card w on c.id = w.clientId
+group by 1,2),
+c0_1 as
+(select
+	  globalKey as globalKey
+	, date_trunc('month', phoneDisabledUntil - interval 30 year) as createdAt
+	, count(case when phoneDisabledUntil > '2040-01-01' then id end) as phone_disabled_cnt
+from client
+where phoneDisabledUntil is not null
+group by 1,2),
+c as
+(select
+	  globalKey
+	, mon as countedAt
+	, sum(clients_cnt) as clients_cnt
+	, sum(wallet_cards_ios_cnt) as wallet_cards_ios_cnt
+	, sum(wallet_cards_android_cnt) as wallet_cards_android_cnt
+	, sum(clients_with_phone_cnt) as clients_with_phone_cnt
+from c0, gen_series
+where createdAt < mon
+group by 1,2),
+c1 as
+(select
+	  globalKey
+	, mon as countedAt
+	, sum(phone_disabled_cnt) as phone_disabled_cnt
+from c0_1, gen_series
+where createdAt < mon
+group by 1,2),
+push as
+(select 
+	  globalKey
+	, date_trunc('month', finishedAtDay) as finishedAtDay
+	, sum(cnt) as push_cnt
+from sending_push
+group by 1,2),
+sms_price_0 as
+(select
+	  globalKey
+	, createdAt
+	, case 
+		when toDate(any(createdAt) over (partition by globalKey order by createdAt rows between 1 following and 1 following)) = Date('1970-01-01')
+		then Date('2099-01-01') else
+		any(createdAt) over (partition by globalKey order by createdAt rows between 1 following and 1 following) end as createdAt_to
+	, price_sms
+from brand_price_history),
+sms_price as
+(select
+	  globalKey
+	, mon as priceAt
+	, min(price_sms) as price_sms
+from sms_price_0, gen_series
+where mon >= createdAt and mon <= createdAt_to
+group by 1,2)
+select
+	  b.name as brand_name
+	, mon
+	, coalesce(x.sub_amount,0) as sub_amount
+	, coalesce(x.sms_amount,0) as sms_amount
+	, coalesce(x.sms_stat_amount,0) as sms_stat_amount
+	, coalesce(p.cnt_without_card,0) as cnt_without_card
+	, coalesce(p.cnt_with_card,0) as cnt_with_card
+	, coalesce(p.unique_clients_cnt,0) as unique_clients_cnt
+	, coalesce(p.revenue_total,0) as revenue_total
+	, coalesce(p.revenue_without_card,0) as revenue_without_card
+	, coalesce(p.avg_amount_with_card,0) as avg_amount_with_card
+	, coalesce(p.avg_amount_without_card,0) as avg_amount_without_card
+	, coalesce(p.mailing_revenue,0) as mailing_revenue
+	, coalesce(p.mailing_discount,0) as mailing_discount
+	, coalesce(p.offer_revenue,0) as offer_revenue
+	, coalesce(p.offer_discount,0) as offer_discount
+	, coalesce(p.promocode_revenue,0) as promocode_revenue
+	, coalesce(p.promocode_discount,0) as promocode_discount
+	, coalesce(p.friend_revenue,0) as friend_revenue
+	, coalesce(p.friend_discount,0) as friend_discount
+	, coalesce(p.avg_profit_with_card,0) as avg_profit_with_card
+	, coalesce(p.avg_profit_without_card,0) as avg_profit_without_card
+	, coalesce(p.gc_revenue,0) as gc_revenue
+	, coalesce(p.gc_discount,0) as gc_discount
+	, coalesce(c.clients_cnt,0) as clients_cnt
+	, coalesce(c.wallet_cards_ios_cnt,0) as wallet_cards_ios_cnt
+	, coalesce(c.wallet_cards_android_cnt,0) as wallet_cards_android_cnt
+	, coalesce(c.clients_with_phone_cnt,0) as clients_with_phone_cnt
+	, coalesce(c1.phone_disabled_cnt,0) as phone_disabled_cnt
+	, coalesce(push.push_cnt,0) as push_cnt
+	, coalesce(sms.price_sms,0) as price_sms
+from brand b, gen_series
+left join x on x.globalKey = b.globalKey and x.billedAt = mon
+left join p on p.globalKey = b.globalKey and p.executedAt = mon
+left join c on c.globalKey = b.globalKey and c.countedAt = mon
+left join c1 on c1.globalKey = b.globalKey and c1.countedAt = mon
+left join push on push.globalKey = b.globalKey and push.finishedAtDay = mon
+left join sms_price sms on sms.globalKey = b.globalKey and sms.priceAt = mon;
+
+select * from bi_clients_report_from_product;
