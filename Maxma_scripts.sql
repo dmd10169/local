@@ -6241,9 +6241,29 @@ sms_price as
 	, min(price_sms) as price_sms
 from sms_price_0, gen_series
 where mon >= createdAt and mon <= createdAt_to
-group by 1,2)
+group by 1,2),
+brand_data as
+(select
+	  globalKey
+	, name
+	, case
+		when status = '0' then 'На интеграции'
+		when status = '5' then 'Подготовка к запуску'
+		when status = '1' then 'Активен'
+		when status = '2' then 'Приостановлен'
+		when status = '3' then 'Архивный'
+		when status = '4' then 'Удалён'
+		when status = '6' then 'Возврат в продажи'
+	  else 'Не известный' end as status_name
+	, case when arrayStringConcat(groupArray(replaceAll(ind,'"','')),' | ') = '' then 'Нет данных'
+		else arrayStringConcat(groupArray(replaceAll(ind,'"','')),' | ') end as industry
+from brand
+	array join JSONExtractArrayRaw(coalesce(JSONExtractString(extraFields, 'industry'), '[]')) as ind
+group by 1,2,3)
 select
 	  b.name as brand_name
+	, b.status_name as status_name
+	, b.industry as industry
 	, mon
 	, coalesce(x.sub_amount,0) as sub_amount
 	, coalesce(x.sms_amount,0) as sms_amount
@@ -6274,7 +6294,7 @@ select
 	, coalesce(c1.phone_disabled_cnt,0) as phone_disabled_cnt
 	, coalesce(push.push_cnt,0) as push_cnt
 	, coalesce(sms.price_sms,0) as price_sms
-from brand b, gen_series
+from brand_data b, gen_series
 left join x on x.globalKey = b.globalKey and x.billedAt = mon
 left join p on p.globalKey = b.globalKey and p.executedAt = mon
 left join c on c.globalKey = b.globalKey and c.countedAt = mon
@@ -6283,3 +6303,5 @@ left join push on push.globalKey = b.globalKey and push.finishedAtDay = mon
 left join sms_price sms on sms.globalKey = b.globalKey and sms.priceAt = mon;
 
 select * from bi_clients_report_from_product;
+
+
