@@ -277,6 +277,8 @@ with t as
 (select
 	  df.brand_id
 	, df.accountManager
+	, df.salesManager
+	, df.projectManager
 	, df.dt
 	, df.status
     , df.fee
@@ -293,18 +295,24 @@ total as
 (select
 	  t.brand_id as brand_id
 	, t.accountManager as accountManager
+	, t.salesManager as salesManager
+	, t.projectManager as projectManager
 	, t.dt as dt
+	, t.status as status
     , sum(t.fee) as fee
 	, sum(t.fee_d) as fee_delta_all
 	, sum(case when t.status <> 0 and t.status <> 5 and t.status <> 6 and t.brand_start_flag = 0 then t.fee_d else 0 end) as fee_delta --разница абонки на сегодня в сравнении с вчерашней
 	, sum(case when t.status <> 0 and t.status <> 5 and t.status <> 6 and t.fee_d > 0 and t.brand_start_flag = 0 then t.fee_d else 0 end) as fee_up
 	, sum(case when t.status <> 0 and t.status <> 5 and t.status <> 6 and t.fee_d < 0 and t.brand_start_flag = 0 then t.fee_d else 0 end) as fee_down
 from t
-group by 1,2,3)
+group by 1,2,3,4,5,6)
 select
 	  brand_id
 	, accountManager
+	, salesManager
+	, projectManager
 	, dt
+	, status
     , fee
 	, fee_delta_all
 	, fee_delta
@@ -619,35 +627,44 @@ left join brand b on b.globalKey = s.brand_id;
 
 select * from bi_daily_sla_v_start;
 
---Данные по клиентам брендов и абонентки в зависимости от их количества (раньше, когда не было тарифов списание проходило по этой логике)
-drop table bi_daily_brand_clients;
-create live view bi_daily_brand_clients with refresh 14400 as
-with b as --бренды с датой первого появления в системе
+--Статистика числа клиентов у брендов
+drop table bi_brand_clients_stat;
+create live view bi_brand_clients_stat with refresh 14400 as
+with wallet_clients as
+(select 
+	distinct clientId 
+from wallet_card),
+b as --таблица с брендами
 (select
 	  brand_id
 	, dt
 	, min(dt) over (partition by brand_id) as min_dt
 from bi_daily_fee),
-c0 as --число клиентов созданные на определённую дату
+c0 as --собираем кол-во клиентов
+((select
+	  c.globalKey as brand_id
+	, date(date_trunc('day',date_trunc('hour', c.createdAt), 'Europe/Moscow')) as dt
+	, toInt64(count(distinct c.id)) as clients
+	, toInt64(count(distinct w.clientId)) as clients_wallet
+from client c
+left join wallet_clients w on w.clientId = c.id
+group by 1,2)
+union all
 (select
-	  globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',createdAt), 'Europe/Moscow')) as dt
-	, toInt64(count(distinct id)) as clients
-from client
-group by 1,2
-union all --число удалённых клиентов на дату (дата удаления для нас дата обновления записи)
-select
-	  globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',updatedAt), 'Europe/Moscow')) as dt
-	, toInt64(-count(distinct id)) as clients
-from client
-where isDeleted = true
-group by 1,2),
-c as --сумма созданных или удалённых клиентов бренда на дату
+	  c.globalKey as brand_id
+	, date(date_trunc('day',date_trunc('hour',case when c.updatedAt < c.createdAt then c.createdAt else c.updatedAt end), 'Europe/Moscow')) as dt
+	, toInt64(-count(distinct c.id)) as clients
+	, toInt64(-count(distinct w.clientId)) as clients_wallet
+from client c
+left join wallet_clients w on w.clientId = c.id
+where c.isDeleted = true
+group by 1,2)),
+c as
 (select
 	  brand_id
 	, dt
 	, sum(clients) as clients
+	, sum(clients_wallet) as clients_wallet
 from c0
 group by 1,2),
 c1 as
@@ -656,24 +673,34 @@ c1 as
 	, coalesce(b.dt, c.dt) as dt
 	, max(b.min_dt) over (partition by coalesce(b.brand_id, c.brand_id)) as min_dt
 	, coalesce(c.clients,0) as clients
+	, coalesce(c.clients_wallet,0) as clients_wallet
 from b
 full join c
 	on c.brand_id = b.brand_id and c.dt = b.dt),
-c_all0 as --считаем на дату сколько накопительно клиентов есть у бренда
+c_all0 as
 (select
 	  brand_id
 	, dt
 	, min_dt
 	, sum(clients) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients
-from c1),
-c_all as
-(select
-	  brand_id
-	, dt
-	, clients
-from c_all0
-where dt >= min_dt),
-price_h00 as --прайс по бренду сколько должно быть списано в зависимости от клиентской базы
+	, sum(clients_wallet) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients_wallet
+from c1)
+select
+	  c.brand_id as brand_id
+	, c.dt as dt
+	, c.clients as clients
+	, c.clients_wallet as clients_wallet
+	, toInt64(JSONExtractString(b.extraFields, 'expectedClientsCount')) as clients_forecast
+from c_all0 c
+left join brand b on b.globalKey = c.brand_id
+where dt >= min_dt;
+
+select * from bi_brand_clients_stat;
+
+--Данные по клиентам брендов и абонентки в зависимости от их количества (раньше, когда не было тарифов списание проходило по этой логике)
+drop table bi_daily_brand_clients;
+create live view bi_daily_brand_clients with refresh 14400 as
+with price_h00 as --прайс по бренду сколько должно быть списано в зависимости от клиентской базы
 (select
       bph.globalKey as brand_id
     , date(date_trunc('day',date_trunc('hour',bph.createdAt), 'Europe/Moscow')) + 1 as dt
@@ -738,9 +765,9 @@ f as --объединяем сколько клиентов у клиента н
 	, p.clients_min as clients_min
 	, p.clients_max as clients_max
 	, p.fee_value as fee_value
-	, toInt64(JSONExtractString(b.extraFields, 'expectedClientsCount')) as clients_forecast --прогноз клиентской базы, заполняется в процессе интеграции бренда до запуска и в первые дни после запуска
-from c_all c
-left join brand b on b.globalKey = c.brand_id
+	, c.clients_forecast as clients_forecast --прогноз клиентской базы, заполняется в процессе интеграции бренда до запуска и в первые дни после запуска
+from bi_brand_clients_stat c
+--left join brand b on b.globalKey = c.brand_id
 left join price_h_f p
 	on p.brand_id = c.brand_id and p.dt_from <= p.dt_to
 where c.dt >= coalesce(p.dt_from, date('1970-01-01')) and c.dt <= coalesce(p.dt_to, date('2149-06-06')) 
@@ -827,7 +854,7 @@ from total;
 
 select * from bi_daily_clients;
 
---Потери и прирост по дням по типам изменения абонки (то есть может быть прирост от запуска или от роста клиентской базы и т.п.)
+/*--Потери и прирост по дням по типам изменения абонки (то есть может быть прирост от запуска или от роста клиентской базы и т.п.)
 --Сейчас часть событий лежит внутри тарифа, а раньше считали через подключение/отключения модулей
 --Тут не буду описывать детально логику, лучше если будет необходимость погрузиться
 drop table bi_daily_fee_type_dynamic;
@@ -1041,7 +1068,7 @@ select
 	, t.fee_delta
 from all_data t;
 
-select * from bi_daily_fee_type_dynamic;
+select * from bi_daily_fee_type_dynamic;*/
 
 --Долги
 create live view bi_daily_debt with refresh 14400 as
@@ -1119,6 +1146,7 @@ left join (select distinct username from crm_operator where isActive = false or 
 
 select * from bi_daily_brand_data;
 
+/* -- Старая версия хронологии
 --Хронология событий по брендам для сотрудников с временем события и аллокацией дневных изменений абонки на события
 --Это мы сделали для того, чтобы смотреть все события по дате и времени, которые происходят с брендом
 --Есть важный момент в логике, например, у нас бренд отключили 01.10.2024 в 15:00, но при этом на эту дату у него уже было списание абонки
@@ -1542,6 +1570,7 @@ left join default.bi_daily_fee f1 on f1.brand_id = u.brand_id and f1.dt = date(u
 left join default.bi_daily_ltv l on l.brand_id = u.brand_id and l.dt = date(u.dtime)
 left join default.bi_brand_managers bbm on bbm.brand_id = u.brand_id and bbm.dt = date(u.dtime)
 order by 3, 1;
+*/
 
 --Определение границ для среднего чека
 with t as
@@ -5123,80 +5152,16 @@ tariff_price_fixed as
 	, any(discountType) over (partition by coalesce(tariffComponentId, tariffBrandComponentId) 
 			order by createdAt, clientsFrom rows between 1 following and 1 following) as discountType_next
 from tariff_price_fixed_0),
-b as --таблица с брендами
-(select
-	  brand_id
-	, dt
-	, min(dt) over (partition by brand_id) as min_dt
-from bi_daily_fee),
-c0 as --собираем кол-во клиентов
-(select
-	  globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',createdAt), 'Europe/Moscow')) as dt
-	, toInt64(count(distinct id)) as clients
-from client
-group by 1,2
-union all
-select
-	  globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',case when updatedAt < createdAt then createdAt else updatedAt end), 'Europe/Moscow')) as dt
-	, toInt64(-count(distinct id)) as clients
-from client
-where isDeleted = true
-group by 1,2),
-c as
-(select
-	  brand_id
-	, dt
-	, sum(clients) as clients
-from c0
-group by 1,2),
-c1 as
-(select 
-	  coalesce(b.brand_id, c.brand_id) as brand_id
-	, coalesce(b.dt, c.dt) as dt
-	, max(b.min_dt) over (partition by coalesce(b.brand_id, c.brand_id)) as min_dt
-	, coalesce(c.clients,0) as clients
-from b
-full join c
-	on c.brand_id = b.brand_id and c.dt = b.dt),
-c_all0 as
-(select
-	  brand_id
-	, dt
-	, min_dt
-	, sum(clients) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients
-from c1),
-c_all as
-(select
-	  brand_id
-	, dt
-	, clients
-from c_all0
-where dt >= min_dt),
-brand_w_clients0 as
-(select
-	  brand_id as globalKey
-	, dt + 1 as dt
-	, clients
-from c_all),
-clients_forecast as --прогноз клиентов для брендов, которые ещё не запущены
-(select 
-	  bs.brand_id
-	, toInt64(JSONExtractString(b.extraFields, 'expectedClientsCount')) as clients_forecast
-	, min(bs.fee_start_date) as fee_start_date
-from bi_daily_starts bs
-left join brand b on b.globalKey = bs.brand_id
-group by 1,2),
 brand_w_clients as
 (select
-	  b.globalKey
-	, b.dt
-	, case when cf.clients_forecast is not null
-		then case when cf.fee_start_date > b.dt then cf.clients_forecast else b.clients end
+	  b.brand_id as globalKey
+	, b.dt + 1 as dt
+	, case when b.clients_forecast is not null
+		then case when bs.fee_start_date > b.dt + 1 then b.clients_forecast else b.clients end
 	  else b.clients end as clients
-from brand_w_clients0 b
-left join clients_forecast cf on cf.brand_id = b.globalKey),
+from bi_brand_clients_stat b
+left join (select brand_id, min(fee_start_date) as fee_start_date from bi_daily_starts group by 1) bs 
+	on b.brand_id = bs.brand_id),
 brand_w_tariff as  --получаем для каждого бренда на определённую дату свой тариф
 (select
 	  bc.*
@@ -5340,6 +5305,8 @@ select --тут уже соединяем данные по базовому т�
 	, coalesce(bnt.dt, bt.dt) as dt
 	, coalesce(t.name, 'Свой тариф') as tariff_name
 	, coalesce(tm.name, 'Нет модуля') as tariff_module_name
+	, case when bnt.tariffModuleId is not null then coalesce(bnt.clientsFrom, 0) 
+		else coalesce(bt.clientsFrom, 0) end as clientsFrom
 	, case when bnt.tariffModuleId is not null then coalesce(bnt.clientsTo, bnt.clientsFrom) 
 		else coalesce(bt.clientsTo, bt.clientsFrom) end as clientsTo
 	, case when bnt.tariffModuleId is not null then bnt.pricePerClient else bt.pricePerClient end * 365/12 as pricePerClient
@@ -5351,8 +5318,8 @@ from brand_w_base_tariff bt
 full join brand_w_non_base_tariff bnt on bt.globalKey = bnt.globalKey and bt.dt = bnt.dt and bt.tariffModuleId = bnt.tariffModuleId
 left join tariff_module tm on tm.id = coalesce(bnt.tariffModuleId, bt.tariffModuleId)
 left join tariff t on t.id = bt.tariffId
-group by 1,2,3,4,5,6,7,8
-order by 1,2,3,4,5,6,7,8;
+group by 1,2,3,4,5,6,7,8,9
+order by 1,2,3,4,5,6,7,8,9;
 
 select * from bi_daily_tariff_module;
 
@@ -5442,95 +5409,17 @@ with max_dt as
 (select
 	max(dt) as max_dt
 from bi_daily_fee),
-wallet_clients as
-(select 
-	distinct clientId 
-from wallet_card),
-b as
-(select
-	  brand_id
-	, dt
-	, min(dt) over (partition by brand_id) as min_dt
-from bi_daily_fee),
-c0 as
-((select
-	  c.globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',c.createdAt), 'Europe/Moscow')) as dt
-	, toInt64(count(distinct c.id)) as clients
-	, toInt64(count(distinct w.clientId)) as clients_wallet
-from client c
-left join wallet_clients w on w.clientId = c.id
-group by 1,2)
-union all
-(select
-	  c.globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',case when c.updatedAt < c.createdAt then c.createdAt else c.updatedAt end), 'Europe/Moscow')) as dt
-	, toInt64(-count(distinct c.id)) as clients
-	, toInt64(-count(distinct w.clientId)) as clients_wallet
-from client c
-left join wallet_clients w on w.clientId = c.id
-where c.isDeleted = true
-group by 1,2)
-),
-c as
-(select
-	  brand_id
-	, dt
-	, sum(clients) as clients
-	, sum(clients_wallet) as clients_wallet
-from c0
-group by 1,2),
-c1 as
-(select 
-	  coalesce(b.brand_id, c.brand_id) as brand_id
-	, coalesce(b.dt, c.dt) as dt
-	, max(b.min_dt) over (partition by coalesce(b.brand_id, c.brand_id)) as min_dt
-	, coalesce(c.clients,0) as clients
-	, coalesce(c.clients_wallet,0) as clients_wallet
-from b
-full join c
-	on c.brand_id = b.brand_id and c.dt = b.dt),
-c_all0 as
-(select
-	  brand_id
-	, dt
-	, min_dt
-	, sum(clients) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients
-	, sum(clients_wallet) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients_wallet
-from c1),
-c_all as
-(select
-	  brand_id
-	, dt
-	, clients
-	, clients_wallet
-from c_all0
-where dt >= min_dt),
-brand_w_clients0 as
-(select
-	  brand_id as globalKey
-	, dt + 1 as dt
-	, clients
-	, clients_wallet
-from c_all),
-clients_forecast as
-(select 
-	  bs.brand_id
-	, toInt64(JSONExtractString(b.extraFields, 'expectedClientsCount')) as clients_forecast
-	, min(bs.fee_start_date) as fee_start_date
-from bi_daily_starts bs
-left join brand b on b.globalKey = bs.brand_id
-group by 1,2),
 brands_w_clients as
 (select
-	  b.globalKey as brand_id
-	, b.dt
-	, case when cf.clients_forecast is not null
-		then case when cf.fee_start_date > b.dt then cf.clients_forecast else b.clients end
+	  b.brand_id as brand_id
+	, b.dt + 1 as dt
+	, case when b.clients_forecast is not null
+		then case when bs.fee_start_date > b.dt + 1 then b.clients_forecast else b.clients end
 	  else b.clients end as clients
 	, b.clients_wallet
-from brand_w_clients0 b
-left join clients_forecast cf on cf.brand_id = b.globalKey),
+from bi_brand_clients_stat b
+left join (select brand_id, min(fee_start_date) as fee_start_date from bi_daily_starts group by 1) bs 
+	on b.brand_id = bs.brand_id),
 brands_w_clients_6_mon_raw as
 (select
 	  b.brand_id
@@ -5660,95 +5549,17 @@ with max_dt as
 (select
 	max(dt) as max_dt
 from bi_daily_fee),
-wallet_clients as
-(select 
-	distinct clientId 
-from wallet_card),
-b as
-(select
-	  brand_id
-	, dt
-	, min(dt) over (partition by brand_id) as min_dt
-from bi_daily_fee),
-c0 as
-((select
-	  c.globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',c.createdAt), 'Europe/Moscow')) as dt
-	, toInt64(count(distinct c.id)) as clients
-	, toInt64(count(distinct w.clientId)) as clients_wallet
-from client c
-left join wallet_clients w on w.clientId = c.id
-group by 1,2)
-union all
-(select
-	  c.globalKey as brand_id
-	, date(date_trunc('day',date_trunc('hour',case when c.updatedAt < c.createdAt then c.createdAt else c.updatedAt end), 'Europe/Moscow')) as dt
-	, toInt64(-count(distinct c.id)) as clients
-	, toInt64(-count(distinct w.clientId)) as clients_wallet
-from client c
-left join wallet_clients w on w.clientId = c.id
-where c.isDeleted = true
-group by 1,2)
-),
-c as
-(select
-	  brand_id
-	, dt
-	, sum(clients) as clients
-	, sum(clients_wallet) as clients_wallet
-from c0
-group by 1,2),
-c1 as
-(select 
-	  coalesce(b.brand_id, c.brand_id) as brand_id
-	, coalesce(b.dt, c.dt) as dt
-	, max(b.min_dt) over (partition by coalesce(b.brand_id, c.brand_id)) as min_dt
-	, coalesce(c.clients,0) as clients
-	, coalesce(c.clients_wallet,0) as clients_wallet
-from b
-full join c
-	on c.brand_id = b.brand_id and c.dt = b.dt),
-c_all0 as
-(select
-	  brand_id
-	, dt
-	, min_dt
-	, sum(clients) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients
-	, sum(clients_wallet) over (partition by brand_id order by dt rows between unbounded preceding and current row) as clients_wallet
-from c1),
-c_all as
-(select
-	  brand_id
-	, dt
-	, clients
-	, clients_wallet
-from c_all0
-where dt >= min_dt),
-brand_w_clients0 as
-(select
-	  brand_id as globalKey
-	, dt + 1 as dt
-	, clients
-	, clients_wallet
-from c_all),
-clients_forecast as
-(select 
-	  bs.brand_id
-	, toInt64(JSONExtractString(b.extraFields, 'expectedClientsCount')) as clients_forecast
-	, min(bs.fee_start_date) as fee_start_date
-from bi_daily_starts bs
-left join brand b on b.globalKey = bs.brand_id
-group by 1,2),
 brands_w_clients as
 (select
-	  b.globalKey as brand_id
-	, b.dt
-	, case when cf.clients_forecast is not null
-		then case when cf.fee_start_date > b.dt then cf.clients_forecast else b.clients end
+	  b.brand_id as brand_id
+	, b.dt + 1 as dt
+	, case when b.clients_forecast is not null
+		then case when bs.fee_start_date > b.dt + 1 then b.clients_forecast else b.clients end
 	  else b.clients end as clients
 	, b.clients_wallet
-from brand_w_clients0 b
-left join clients_forecast cf on cf.brand_id = b.globalKey),
+from bi_brand_clients_stat b
+left join (select brand_id, min(fee_start_date) as fee_start_date from bi_daily_starts group by 1) bs 
+	on b.brand_id = bs.brand_id),
 base_table as
 (select
 	  f.brand_id as brand_id
@@ -6304,4 +6115,323 @@ left join sms_price sms on sms.globalKey = b.globalKey and sms.priceAt = mon;
 
 select * from bi_clients_report_from_product;
 
+-------
+--Динамика по типам (новая версия)
+-------
 
+--События по статусам
+drop table bi_fee_chronology_status;
+create live view bi_fee_chronology_status with refresh 14400 as
+with pilot_end as
+(select
+	  brand_id
+	, dt
+	, case when pilot = 0 and coalesce(any(pilot) over (partition by brand_id order by dt rows between 1 preceding and 1 preceding),0) = 1 then
+		1 else 0 end pilot_stop_flag
+from bi_daily_clients),
+brand_dynamic as
+(select
+	  d.brand_id as brand_id
+	, d.dt as dt
+	, d.status as status
+	, any(d.status) over (partition by d.brand_id order by d.dt rows between 1 preceding and 1 preceding) as status_pre
+	, any(d.status) over (partition by d.brand_id order by d.dt rows between 2 preceding and 2 preceding) as status_pre_pre
+	, case when s.fee_start > 0 then 1 else 0 end as start_flag
+	, v.v_start_days as v_start_days
+	, p.pilot_stop_flag as pilot_stop_flag
+	, d.fee_delta_all as fee_delta
+from bi_daily_fee_dynamic d
+left join bi_daily_starts s on s.brand_id = d.brand_id and s.dt = d.dt and s.fee_start > 0
+left join (select brand_id, min(v_start_days) as v_start_days from bi_daily_v_start group by 1) v on v.brand_id = d.brand_id
+left join pilot_end p on p.brand_id = d.brand_id and p.dt = d.dt and p.pilot_stop_flag = 1)
+select
+	  brand_id
+	, dt
+	, case
+		when start_flag = 1 then 'Запуск'
+	  	when pilot_stop_flag = 1 then 'Окончание пилота'
+	  	when status_pre in ('1') and status in ('0', '5', '6') and fee_delta < 0 then 'Возврат на интеграцию'
+	  	when status_pre in ('0','5','6') and status = '1' and start_flag = 0 and fee_delta > 0 then 'Возвращение с интеграции'
+	  	when (status_pre in ('1') or status_pre_pre in ('1')) and status = '2' and fee_delta < 0 then 'Приостановка'
+	  	when (status_pre in ('2') or status_pre_pre in ('2')) and status = '1' and fee_delta > 0 then 'Возврат с приостановки'
+	  	when status_pre in ('1','2') and status > 2 and status <> 5 and status <> 6 and fee_delta < 0 then 'Отключение'
+	  	when status_pre > 2 and status_pre <> 5 and status_pre <> 6 and status in ('1','2') and fee_delta > 0 then 'Возврат с отключения'
+	  end as delta_type
+	, case
+		when start_flag = 1 then case when v_start_days is not null 
+			then concat('Запуск (интеграция ', toString(v_start_days), ' дн.)') else 'Запуск' end
+	  	when pilot_stop_flag = 1 and fee_delta > 0 then 'Рост после окончания пилота'
+	  	when pilot_stop_flag = 1 and fee_delta < 0 then 'Снижение после окончания пилота'
+	  	when status_pre in ('1') and status in ('0', '5', '6') and fee_delta < 0 then 'Возврат на интеграцию'
+	  	when status_pre in ('0','5','6') and status = '1' and start_flag = 0 and fee_delta > 0 then 'Возвращение с интеграции'
+	  	when (status_pre in ('1') or status_pre_pre in ('1')) and status = '2' and fee_delta < 0 then 'Приостановка'
+	  	when (status_pre in ('2') or status_pre_pre in ('2')) and status = '1' and fee_delta > 0 then 'Возврат с приостановки'
+	  	when status_pre in ('1','2') and status > 2 and status <> 5 and status <> 6 and fee_delta < 0 then 'Отключение'
+	  	when status_pre > 2 and status_pre <> 5 and status_pre <> 6 and status in ('1','2') and fee_delta > 0 then 'Возврат с отключения'
+	  end as delta_type_detailed
+	, fee_delta
+from brand_dynamic
+where fee_delta <> 0 and delta_type is not null;
+
+select * from bi_fee_chronology_status;
+
+--События по тарифу
+drop table bi_fee_chronology_tariff;
+create live view bi_fee_chronology_tariff with refresh 14400 as
+with t0 as
+(select 
+	  brand_id
+	, dt
+	, tariff_name
+	, any(tariff_name) over (partition by brand_id, tariff_module_name order by dt rows between 1 preceding and 1 preceding) as tariff_name_before
+	, tariff_module_name
+	, clientsFrom
+	, clientsTo
+	, discount_value
+	, any(discount_value) over (partition by brand_id, tariff_module_name order by dt rows between 1 preceding and 1 preceding) as discount_value_before
+	, tariff_fee
+	, any(tariff_fee) over (partition by brand_id, tariff_module_name order by dt rows between 1 preceding and 1 preceding) as tariff_fee_before	
+from bi_daily_tariff_module),
+t as
+(select
+	  t0.brand_id as brand_id
+	, t0.dt as dt
+	, t0.tariff_name as tariff_name
+	, t0.tariff_name_before as tariff_name_before
+	, t0.tariff_module_name as tariff_module_name
+	, any(case when c.clients > t0.clientsTo or c.clients < t0.clientsFrom then 1 else 0 end)
+		over (partition by t0.brand_id, t0.tariff_module_name order by t0.dt rows between 1 preceding and 1 preceding) as clients_change
+	, t0.discount_value as discount_value
+	, t0.discount_value_before as discount_value_before
+	, t0.tariff_fee as tariff_fee
+	, t0.tariff_fee_before as tariff_fee_before
+	, t0.tariff_fee - t0.tariff_fee_before as tariff_fee_delta
+	, case when t0.tariff_fee_before > 0 and t0.tariff_fee = 0 then t0.dt end -
+	  max(case when t0.tariff_fee_before = 0 and t0.tariff_fee > 0 then t0.dt end) 
+		over (partition by t0.brand_id, t0.tariff_module_name order by t0.dt) as module_days_worked
+from t0
+left join bi_brand_clients_stat c on c.brand_id = t0.brand_id and c.dt = t0.dt)
+select
+	  brand_id
+	, dt
+	, case when tariff_fee_delta <> 0 then
+		case 
+			when tariff_fee_before = 0 then 'Включение модулей'
+			when tariff_fee = 0 then 'Отключение модулей'
+			when tariff_name <> tariff_name_before then 'Смена тарифа'
+			when clients_change = 1 and tariff_module_name = 'Платформа' then 'Изменение клиентской базы'
+		 else 'Изменение стоимости модулей тарифа' 
+		end
+	  else null end as delta_type
+	, case when tariff_fee_delta <> 0 then
+		case 
+			when tariff_fee_before = 0 then concat('Включение модуля ', tariff_module_name
+				, case when discount_value is not null then concat(' (скидка ',discount_value,')') else 
+					case when discount_value_before is not null then ' (отмена скидки)' else '' end end)
+			when tariff_fee = 0 then concat('Отключение модуля ', tariff_module_name, ' (отработал ', toString(module_days_worked), ' дн.)')
+			when tariff_name <> tariff_name_before then concat('Смена тарифа ',tariff_name_before,' -> ',tariff_name,' по модулю ',tariff_module_name
+				, case when discount_value is not null then concat(' (скидка ',discount_value,')') else
+					case when discount_value_before is not null then ' (отмена скидки)' else '' end end)
+			when clients_change = 1 and tariff_module_name = 'Платформа' and tariff_fee_delta > 0 then 'Повышение тарифа из-за роста клиентской базы'
+			when clients_change = 1 and tariff_module_name = 'Платформа' and tariff_fee_delta < 0 then 'Понижение тарифа из-за снижения клиентской базы'
+		 else concat('Изменение стоимости модуля ', tariff_module_name
+		 	, case when discount_value is not null then concat(' (скидка ',discount_value,')') else 
+		 		case when discount_value_before is not null then ' (отмена скидки)' else '' end end) end
+	  else null end as delta_type_detailed
+	, toDecimal64(round(tariff_fee_delta), 8) as fee_delta
+from t
+where tariff_fee_delta <> 0;
+
+select * from bi_fee_chronology_tariff;
+
+--Ручные изменения абонки вне тарифов
+drop table bi_fee_chronology_hand_correction;
+create live view bi_fee_chronology_hand_correction with refresh 14400 as
+with t00 as
+(select
+      bph.globalKey as brand_id
+    , date(date_trunc('day',date_trunc('hour', bph.createdAt), 'Europe/Moscow')) as dt
+    , toInt64(JSONExtractString(prc_unnest, 'clients')) as clients
+    , JSONExtractFloat(prc_unnest, 'monthly') as fee_value
+from default.brand_price_history bph
+    array join JSONExtractArrayRaw(coalesce(bph.price_perClient, '[]')) as prc_unnest),
+t0 as
+(select
+	  brand_id
+	, dt
+	, fee_value
+	, fee_value - any(fee_value) over (partition by brand_id, clients order by dt rows between 1 preceding and 1 preceding) as fee_delta
+from t00
+where brand_id not in ('587aa3d2-269e-4630-a266-bbbcc784470f','e695fef3-d57e-42f2-a2e3-b3b085a21a93','44759604-3723-4512-a447-2d7184172a40'))
+select
+	  brand_id
+	, dt + 1 as dt
+	, case when fee_delta <> 0 then 'Ручные корректировки (вне тарифа)' end as delta_type
+	, case when fee_delta > 0 then 'Ручные корректировки вверх (вне тарифа)' 
+		else 'Ручные корректировки вниз (вне тарифа)' end as delta_type_detailed
+	, toDecimal64(round(fee_delta), 8) as fee_delta
+from t0
+where fee_delta <> 0 and fee_delta <> fee_value;
+
+select * from bi_fee_chronology_hand_correction;
+
+--Включение и отключение модулей вне тарифов
+drop table bi_fee_chronology_moduls;
+create live view bi_fee_chronology_moduls with refresh 14400 as
+with moduls00 as
+(select
+      bph.globalKey as brand_id
+    , bph.createdAt as createdAt
+    , JSONExtractString(opt_unnest, 'name') as fee_type
+    , sum(JSONExtractFloat(opt_unnest, 'monthly')) as fee_value 
+from default.brand_price_history bph
+    array join JSONExtractArrayRaw(coalesce(bph.price_options, '[]')) as opt_unnest
+group by 1,2,3),
+moduls0 as
+(select
+	  brand_id
+	, date(date_trunc('day',date_trunc('hour', createdAt), 'Europe/Moscow')) as dt
+	, fee_type
+	, fee_value
+	, fee_value - 
+	  coalesce(any(fee_value) 
+		over (partition by brand_id, fee_type order by createdAt rows between 1 preceding and 1 preceding),0) as fee_delta
+	, any(fee_type) over (partition by brand_id, fee_type order by createdAt rows between 1 preceding and 1 preceding) as fee_type_old
+from moduls00),
+moduls as
+(select
+	  brand_id
+	, dt
+	, fee_type
+	, any(dt) over (partition by brand_id, fee_type order by dt rows between 1 preceding and 1 preceding) as dt_old
+	, fee_delta
+from moduls0
+where not(fee_delta = 0 and fee_type = fee_type_old)),
+moduls_days as
+(select 
+	  m.brand_id
+	, m.dt
+	, m.fee_type
+	, sum(case when f.fee > 0 then 1 else 0 end) as days_w_module
+from moduls m
+left join bi_daily_fee f on f.brand_id = m.brand_id
+where m.fee_delta < 0 
+	and f.dt >= (case when m.dt_old < Date('2022-10-01') then Date('2022-10-01') else m.dt_old end) 
+	and f.dt < m.dt
+group by 1,2,3)
+select
+	  m.brand_id as brand_id
+	, m.dt + 1 as dt
+	, case when m.fee_delta >= 0 then 'Включение модулей (вне тарифа)' else 'Отключение модулей (вне тарифа)' end as delta_type
+	, case when m.fee_delta >= 0 then concat('Включение модуля ', m.fee_type, ' (вне тарифа)') 
+		else concat('Отключение модуля ', m.fee_type,
+			case when coalesce(md.days_w_module,0)>0 then 
+				concat(' (отработал ', toString(md.days_w_module),' дн., вне тарифа)') else '' end) end as delta_type_detailed
+	, toInt64(m.fee_delta) as fee_delta
+from moduls m
+left join moduls_days md on md.brand_id = m.brand_id and md.dt = m.dt and md.fee_type = m.fee_type
+where m.fee_delta is not null;
+
+select * from bi_fee_chronology_moduls;
+
+--Новая версия хронологии
+drop table bi_fee_dynamic_chronology;
+create live view bi_fee_dynamic_chronology with refresh 14400 as
+with chronology as
+(select *, 1 as weight from bi_fee_chronology_status
+union all
+select *, 2 as weight from bi_fee_chronology_tariff
+union all
+select *, 3 as weight from bi_fee_chronology_hand_correction
+union all
+select *, 4 as weight from bi_fee_chronology_moduls
+),
+t as (
+select
+	  d.brand_id as brand_id
+	, d.dt as dt
+	, d.accountManager as accountManager
+	, d.salesManager as salesManager
+	, d.projectManager as projectManager
+	, d.status as status
+	, d.fee
+	, d.fee_delta_all as fee_delta_all
+	, c.delta_type as delta_type
+	, c.delta_type_detailed as delta_type_detailed
+	, c.fee_delta as fee_delta_chrono
+	, sum(c.fee_delta) over (partition by d.brand_id, d.dt) as fee_delta_chrono_by_dt
+	, sum(c.fee_delta) over (partition by d.brand_id, d.dt order by weight
+		, case when d.fee_delta_all * c.fee_delta < 0 then 1 else 0 end, abs(fee_delta_chrono)) as fee_delta_chrono_roll
+	, row_number() over (partition by d.brand_id, d.dt order by weight
+		, case when d.fee_delta_all * c.fee_delta < 0 then 1 else 0 end, abs(fee_delta_chrono) desc) as rn
+	, c.weight as weight
+	, max(c.weight) over (partition by d.brand_id, d.dt) as max_weight
+from bi_daily_fee_dynamic d
+left join chronology c on c.brand_id = d.brand_id and c.dt = d.dt
+where d.fee_delta_all <> 0)
+select
+	  t.brand_id as brand_id
+	, coalesce(b.name,'N/A') as brand
+	, t.dt as dt
+	, t.accountManager as accountManager
+	, t.salesManager as salesManager
+	, t.projectManager as projectManager
+	, t.status as status_id
+	, case
+		when t.status = '0' then 'На интеграции'
+		when t.status = '5' then 'Подготовка к запуску'
+		when t.status = '1' then 'Активен'
+		when t.status = '2' then 'Приостановлен'
+		when t.status = '3' then 'Архивный'
+		when t.status = '4' then 'Удалён'
+		when t.status = '6' then 'Возврат в продажи'
+	  else 'Не известный' end as status
+	, l.LTV_on_date as LTV
+	, l.LT_on_date as LT
+	, t.fee as fee
+	, coalesce(t.delta_type, 'Не определено') as delta_type
+	, coalesce(t.delta_type_detailed, 'Не определено') as delta_type_detailed
+	, case
+		when t.fee_delta_chrono is null then t.fee_delta_all
+		when t.fee_delta_chrono_by_dt = t.fee_delta_all then t.fee_delta_chrono
+		when (t.fee_delta_all > 0 and t.fee_delta_chrono_by_dt < t.fee_delta_all) 
+			or (t.fee_delta_all < 0 and t.fee_delta_chrono_by_dt > t.fee_delta_all) then
+				case when t.rn = 1 then t.fee_delta_chrono + (t.fee_delta_all - t.fee_delta_chrono_by_dt) else t.fee_delta_chrono end
+		when (t.fee_delta_all > 0 and t.fee_delta_chrono_by_dt > t.fee_delta_all) 
+			or (t.fee_delta_all < 0 and t.fee_delta_chrono_by_dt < t.fee_delta_all) then
+			case when t.fee_delta_all > 0 then
+				case when t.fee_delta_chrono_roll > t.fee_delta_all then
+					case when t.fee_delta_chrono_roll - t.fee_delta_chrono < t.fee_delta_all 
+						then t.fee_delta_all - (t.fee_delta_chrono_roll - t.fee_delta_chrono) else 0 end
+				else t.fee_delta_chrono end
+			else
+				case when t.fee_delta_chrono_roll < t.fee_delta_all then
+					case when t.fee_delta_chrono_roll - t.fee_delta_chrono > t.fee_delta_all 
+						then t.fee_delta_all - (t.fee_delta_chrono_roll - t.fee_delta_chrono) else 0 end
+				else t.fee_delta_chrono end
+			end
+	  end as fee_delta
+from t
+left join brand b on b.globalKey = t.brand_id
+left join bi_daily_ltv l on l.brand_id = t.brand_id and l.dt = t.dt
+left join default.bi_brand_managers bbm on bbm.brand_id = t.brand_id and bbm.dt = t.dt
+where t.fee_delta_all <> 0;
+
+select * from bi_fee_dynamic_chronology;
+
+--Новая версия динамики по типам
+drop table bi_daily_fee_type_dynamic;
+create live view bi_daily_fee_type_dynamic with refresh 14400 as
+select
+	  brand_id
+	, accountManager
+	, salesManager
+	, projectManager
+	, dt
+	, delta_type
+	, case when fee_delta > 0 then delta_type end as delta_type_up
+	, case when fee_delta < 0 then delta_type end as delta_type_down
+	, sum(fee_delta) as fee_delta
+from bi_fee_dynamic_chronology;
+
+select * from bi_daily_fee_type_dynamic;

@@ -3300,3 +3300,189 @@ comment 'CR в заказы из доставленных';
 ---------------
 alter table bi_clients_report_from_product 
 modify comment 'Слепок выгрузки из базы (по ТЗ задачи BI-83)';
+---------------
+
+---------------
+alter table bi_brand_clients_stat 
+modify comment 'Статистика по клиентам брендов';
+
+alter table bi_brand_clients_stat
+modify column brand_id 
+comment 'ID бренда';
+
+alter table bi_brand_clients_stat 
+modify column dt 
+comment 'День';
+
+alter table bi_brand_clients_stat 
+modify column clients 
+comment 'Число клиентов на дату';
+
+alter table bi_brand_clients_stat 
+modify column clients_wallet
+comment 'Число клиентов с Wallet на дату';
+
+alter table bi_brand_clients_stat 
+modify column clients_forecast
+comment 'Прогнозное число клиентов до запуска бренда';
+---------------
+
+---------------
+alter table bi_fee_chronology_status 
+modify comment 'Хронология событий по статусам';
+
+alter table bi_fee_chronology_status
+modify column brand_id 
+comment 'ID бренда';
+
+alter table bi_fee_chronology_status 
+modify column dt 
+comment 'День';
+
+alter table bi_fee_chronology_status 
+modify column delta_type 
+comment 'Тип изменения абонентской платы';
+
+alter table bi_fee_chronology_status 
+modify column delta_type_detailed 
+comment 'Тип изменения абонентской платы (детальный)';
+
+alter table bi_fee_chronology_status 
+modify column fee_delta 
+comment 'Изменение абонки';
+---------------
+
+---------------
+alter table bi_fee_chronology_tariff 
+modify comment 'Хронология событий по тарифу';
+
+alter table bi_fee_chronology_tariff
+modify column brand_id 
+comment 'ID бренда';
+
+alter table bi_fee_chronology_tariff 
+modify column dt 
+comment 'День';
+
+alter table bi_fee_chronology_tariff 
+modify column delta_type 
+comment 'Тип изменения абонентской платы';
+
+alter table bi_fee_chronology_tariff 
+modify column delta_type_detailed 
+comment 'Тип изменения абонентской платы (детальный)';
+
+alter table bi_fee_chronology_tariff 
+modify column fee_delta 
+comment 'Изменение абонки';
+---------------
+
+---------------
+alter table bi_fee_chronology_hand_correction 
+modify comment 'Хронология событий по ручным корректировкам вне тарифов';
+
+alter table bi_fee_chronology_hand_correction
+modify column brand_id 
+comment 'ID бренда';
+
+alter table bi_fee_chronology_hand_correction 
+modify column dt 
+comment 'День';
+
+alter table bi_fee_chronology_hand_correction 
+modify column delta_type 
+comment 'Тип изменения абонентской платы';
+
+alter table bi_fee_chronology_hand_correction 
+modify column delta_type_detailed 
+comment 'Тип изменения абонентской платы (детальный)';
+
+alter table bi_fee_chronology_hand_correction 
+modify column fee_delta 
+comment 'Изменение абонки';
+---------------
+
+---------------
+alter table bi_fee_chronology_moduls 
+modify comment 'Хронология событий модулям вне тарифов';
+
+alter table bi_fee_chronology_moduls
+modify column brand_id 
+comment 'ID бренда';
+
+alter table bi_fee_chronology_moduls 
+modify column dt 
+comment 'День';
+
+alter table bi_fee_chronology_moduls 
+modify column delta_type 
+comment 'Тип изменения абонентской платы';
+
+alter table bi_fee_chronology_moduls 
+modify column delta_type_detailed 
+comment 'Тип изменения абонентской платы (детальный)';
+
+alter table bi_fee_chronology_moduls 
+modify column fee_delta 
+comment 'Изменение абонки';
+---------------
+
+---------------
+alter table bi_fee_dynamic_chronology 
+modify comment 'Хронология событий модулям вне тарифов';
+
+alter table bi_fee_dynamic_chronology
+modify column brand_id 
+comment 'ID бренда';
+
+alter table bi_fee_dynamic_chronology
+modify column brand 
+comment 'Наименование бренда';
+
+alter table bi_fee_dynamic_chronology 
+modify column dt 
+comment 'День';
+
+alter table bi_fee_dynamic_chronology 
+modify column accountManager 
+comment 'Аккаунт-маркетолог';
+
+alter table bi_fee_dynamic_chronology 
+modify column salesManager 
+comment 'Менеджер продаж';
+
+alter table bi_fee_dynamic_chronology 
+modify column projectManager 
+comment 'Менеджер запуска';
+
+alter table bi_fee_dynamic_chronology 
+modify column status_id
+comment 'ID статуса';
+
+alter table bi_fee_dynamic_chronology 
+modify column status
+comment 'Наименование статуса';
+
+alter table bi_fee_dynamic_chronology 
+modify column LTV
+comment 'Накопительная выручка бренда на день';
+
+alter table bi_fee_dynamic_chronology 
+modify column LT
+comment 'Накопительный срок жизни бренда на день (учитываем дни с выручкой)';
+
+alter table bi_fee_dynamic_chronology 
+modify column fee
+comment 'Ежемесячная абонка';
+
+alter table bi_fee_dynamic_chronology 
+modify column delta_type 
+comment 'Тип изменения абонентской платы';
+
+alter table bi_fee_dynamic_chronology 
+modify column delta_type_detailed 
+comment 'Тип изменения абонентской платы (детальный)';
+
+alter table bi_fee_dynamic_chronology 
+modify column fee_delta 
+comment 'Изменение абонки';
